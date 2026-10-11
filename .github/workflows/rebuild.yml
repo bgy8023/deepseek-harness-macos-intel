@@ -48,7 +48,7 @@ jobs:
   build:
     needs: resolve
     if: needs.resolve.outputs.tag != ''
-    runs-on: macos-latest
+    runs-on: macos-13
     timeout-minutes: 120
     env:
       UPSTREAM_TAG: ${{ needs.resolve.outputs.tag }}
