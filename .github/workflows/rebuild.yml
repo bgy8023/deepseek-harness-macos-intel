@@ -130,6 +130,7 @@ jobs:
             echo '- Not affiliated with or endorsed by DeepSeek. Upstream code is MIT licensed; this repository vendors no upstream code, it only pins one dependency version.'
           } > release-notes.md
           gh release create "intel-${UPSTREAM_TAG}" \
+            -R "$GITHUB_REPOSITORY" \
             "DeepSeek-Harness-${VERSION}-mac-x64.dmg" \
             SHA256SUMS.txt \
             --title "DeepSeek Harness ${VERSION} — Intel macOS" \
