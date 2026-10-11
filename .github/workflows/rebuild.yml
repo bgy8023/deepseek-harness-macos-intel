@@ -48,7 +48,7 @@ jobs:
   build:
     needs: resolve
     if: needs.resolve.outputs.tag != ''
-    runs-on: macos-13
+    runs-on: macos-latest
     timeout-minutes: 120
     env:
       UPSTREAM_TAG: ${{ needs.resolve.outputs.tag }}
@@ -76,6 +76,9 @@ jobs:
 
       - name: Pin Electron to the macOS 12 compatible version
         run: node scripts/pin-electron.mjs upstream
+
+      - name: Relax smoke-test timeouts (arm64 runner runs x64 LibreOffice under Rosetta)
+        run: node scripts/patch-ci-smoke.mjs upstream
 
       - name: Install dependencies
         working-directory: upstream
