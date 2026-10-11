@@ -1,0 +1,133 @@
+name: Rebuild upstream release for Intel macOS
+
+on:
+  schedule:
+    # Daily at 00:00 UTC — checks for a new upstream tag worth rebuilding.
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to build (e.g. dsh-v0.2.1-alpha.2). Empty = newest upstream tag.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild-intel
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - name: Pick target tag
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG='${{ github.event.inputs.tag }}'
+          if [ -z "$TAG" ]; then
+            # Newest upstream tag. Upstream ships only pre-releases during the
+            # developer-preview stage, so every tag is a candidate.
+            TAG=$(gh api 'repos/deepseek-ai/deepseek-harness/tags?per_page=100' \
+              --jq '[.[].name] | map(select(test("^dsh-v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"))) | .[0]')
+          fi
+          echo "target upstream tag: $TAG"
+          if gh release view "intel-$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "already built, nothing to do"
+            echo 'tag=' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.tag != ''
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      UPSTREAM_TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Checkout this repository (build scripts)
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream at target tag
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ needs.resolve.outputs.tag }}
+          path: upstream
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Pin Electron to the macOS 12 compatible version
+        run: node scripts/pin-electron.mjs upstream
+
+      - name: Install dependencies
+        working-directory: upstream
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        working-directory: upstream
+        run: pnpm run build
+
+      - name: Package desktop mac-x64 (unsigned, ad-hoc signed)
+        working-directory: upstream
+        run: pnpm run package:desktop:mac:x64:unsigned
+
+      - name: Verify artifact
+        working-directory: upstream/apps/desktop/.desktop-build/targets/mac-x64/unsigned-artifacts
+        run: |
+          set -euo pipefail
+          DMG=$(ls *.dmg | head -1)
+          VERSION="${UPSTREAM_TAG#dsh-v}"
+          FINAL="DeepSeek-Harness-${VERSION}-mac-x64.dmg"
+          mv "$DMG" "$FINAL"
+          hdiutil verify "$FINAL"
+          mkdir -p /tmp/dsh-mount
+          hdiutil attach -readonly -nobrowse -mountpoint /tmp/dsh-mount "$FINAL"
+          APP=$(find /tmp/dsh-mount -maxdepth 2 -name '*.app' | head -1)
+          echo "app bundle: $APP"
+          BIN=$(find "$APP/Contents/MacOS" -type f -perm +111 | head -1)
+          ARCHS=$(lipo -archs "$BIN")
+          echo "architectures: $ARCHS"
+          case "$ARCHS" in *x86_64*) ;; *) echo "ERROR: not an x86_64 build"; exit 1;; esac
+          MIN=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")
+          echo "LSMinimumSystemVersion=$MIN"
+          hdiutil detach /tmp/dsh-mount
+          shasum -a 256 "$FINAL" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish release
+        working-directory: upstream/apps/desktop/.desktop-build/targets/mac-x64/unsigned-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${UPSTREAM_TAG#dsh-v}"
+          {
+            echo "Unofficial x86_64 rebuild of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) at upstream tag \`$UPSTREAM_TAG\`, pinned to Electron 43.0.0 so it runs on Intel Macs with macOS 12 (Monterey) or newer."
+            echo
+            echo '- Unsigned / ad-hoc signed build: on first launch right-click the app and choose Open, or clear the quarantine flag with `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`.'
+            echo '- Auto-update is disabled in unsigned builds; download new releases manually as upstream tags are rebuilt here.'
+            echo '- Not affiliated with or endorsed by DeepSeek. Upstream code is MIT licensed; this repository vendors no upstream code, it only pins one dependency version.'
+          } > release-notes.md
+          gh release create "intel-${UPSTREAM_TAG}" \
+            "DeepSeek-Harness-${VERSION}-mac-x64.dmg" \
+            SHA256SUMS.txt \
+            --title "DeepSeek Harness ${VERSION} — Intel macOS" \
+            --notes-file release-notes.md
