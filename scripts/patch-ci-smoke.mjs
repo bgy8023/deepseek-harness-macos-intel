@@ -10,11 +10,17 @@
  *      grows. Symptom in CI logs: `runtime payload: killed=true, signal=SIGTERM`.
  *   2. apps/desktop/scripts/smoke-runtime.ts — execFile timeouts (120_000)
  *   3. apps/desktop/scripts/smoke-runtime.ts — AbortSignal.timeout(120_000) fetch deadlines
- *   4. @deepseek-ai/libreoffice-kit DEFAULT_LIMITS.timeoutMs (12e4) — conversion deadline
+ *   4. packages/document/office-to-pdf/src/index.ts — OfficeToPdf provider Config
+ *      timeoutMs default (60_000). The in-app conversion path (ctx.officeToPdf.convert)
+ *      passes this explicitly to the kit, so the kit's DEFAULT_LIMITS patch below does
+ *      NOT cover it. A single docx->pdf conversion under Rosetta exceeds 60s.
+ *      Symptom in CI logs: `LibreOffice conversion timed out` (code: 'timeout').
+ *   5. @deepseek-ai/libreoffice-kit DEFAULT_LIMITS.timeoutMs (12e4) — conversion deadline
  *
- * This script relaxes both to 10 minutes in the upstream checkout BEFORE
- * `pnpm install`, using a pnpm patchedDependencies entry for the kit. It does
- * not alter any shipped code — the kit patch only affects test limits.
+ * This script relaxes them all to 10 minutes in the upstream checkout BEFORE
+ * `pnpm install` / `pnpm run build`, using direct source edits plus a pnpm
+ * patchedDependencies entry for the kit. It does not alter any shipped code —
+ * the patches only affect test-time limits.
  *
  * Usage: node scripts/patch-ci-smoke.mjs <path-to-upstream-checkout>
  */
@@ -52,7 +58,21 @@ if (relaxed === smoke) {
   console.log('patch-ci-smoke: smoke-runtime.ts exec timeouts + fetch deadlines 120_000 -> 600_000')
 }
 
-// 3. libreoffice-kit conversion deadline via pnpm patchedDependencies
+// 4. office-to-pdf provider timeoutMs default (in-app conversion path).
+// The provider passes its config straight to createConverter, so the kit's
+// DEFAULT_LIMITS never applies here. Must be patched BEFORE `pnpm run build`
+// so the compiled lib inside the packaged app picks it up.
+const officePath = join(checkout, 'packages', 'document', 'office-to-pdf', 'src', 'index.ts')
+const office = readFileSync(officePath, 'utf8')
+const officeRelaxed = office.split('.default(60_000)').join('.default(600_000)')
+if (officeRelaxed === office) {
+  console.log('patch-ci-smoke: office-to-pdf Config had no 60_000 timeoutMs default to relax (already patched?)')
+} else {
+  writeFileSync(officePath, officeRelaxed)
+  console.log('patch-ci-smoke: office-to-pdf Config timeoutMs default 60_000 -> 600_000')
+}
+
+// 5. libreoffice-kit conversion deadline via pnpm patchedDependencies
 const KIT_SPEC = '@deepseek-ai/libreoffice-kit@0.1.5'
 const PATCH_REL = 'patches/ci--libreoffice-kit-smoke-timeout.patch'
 const PATCH_ABS = join(checkout, PATCH_REL)
